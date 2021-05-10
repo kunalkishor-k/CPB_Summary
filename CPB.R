@@ -1,0 +1,745 @@
+
+
+# CPB Summary Script last n days (final_version) -----------------------------------------
+
+
+tryCatch({
+  con<- dbConnect(MySQL(), user='sj7829',
+                  password='rWt3QK477279u',
+                  dbname='rivigo_zoom',
+                  host='127.0.0.1', port=4001)
+  dbDisconnect(con)
+},
+error = function(e){
+  system('ssh -fN sj7829@52.76.55.8')})
+
+library(RMySQL)
+library(RPostgreSQL)
+library(dplyr)
+library(gtools)
+library(lubridate)
+
+df_total = data.frame()
+
+for(kkk in 1:2){
+  lapply(dbListConnections(MySQL()), dbDisconnect)
+  
+  con<-dbConnect(MySQL(), user='ry1679',
+                 password='DFj8DMMfM3KSe',
+                 dbname='rivigo_zoom',
+                 host='127.0.0.1', port=4001)
+  
+  print(kkk)
+  consignment<- dbGetQuery(con, paste0("select
+                          c.id,c.cnote,c.status consignment_status,concat(nn.code,'-',nn1.code) as lane,cl.client_code,c.organization_id,c.cnote_type,c.service_type,
+                          date(from_unixtime((c.delivery_date_time/1000)+19800)) delivery_date,
+                          from_unixtime((c.delivery_date_time/1000)+19800) delivery_date_time,
+                          date(from_unixtime((c.promised_delivery_date_time/1000)+19800)) cpd,c.weight,c.volume,c.total_boxes,
+                          from_unixtime(round(c.promised_delivery_date_time/1000)) + interval 5 hour + interval 30 minute as promised_delivery_date_time,
+                          from_unixtime(round(c.booking_date_time/1000)) + interval 5 hour + interval 30 minute as booking_date_time
+                          from consignment c
+                          left join pincode x1 on x1.code=c.from_pin_code
+                          left join zone z on x1.pickup_zone_id=z.id
+                          left join neo4j_location nx on z.location_id=nx.id
+                          left join neo4j_administrative_entity nn on nx.part_of_neo4j_cluster_id=nn.id
+                          left join pincode x2 on x2.code=c.to_pin_code
+                          left join zone z1 on x2.pickup_zone_id=z1.id
+                          left join neo4j_location n1x on z1.location_id=n1x.id
+                          left join neo4j_administrative_entity nn1 on n1x.part_of_neo4j_cluster_id=nn1.id
+                          inner join clients cl on cl.id=c.client_id
+                          where
+                          c.is_active=1 and length(c.cnote)=10 and c.completion_status ='COMPLETE'
+                          
+                          and c.status not in ('DELETED','RTO','DRAFTED','SHORTAGE', 'EXCESS')  
+                          and c.promised_delivery_date_time >= (unix_timestamp(concat('",Sys.Date()-1*kkk,"',' 00:00:00'))*1000-19800000) and 
+                              c.promised_delivery_date_time <  (unix_timestamp(concat('",Sys.Date()-1*(kkk-1),"',' 00:00:00'))*1000)-19800000"))
+  dbDisconnect(con)
+  cncounts<-length(consignment$cnote)
+  print(paste("CNotes:",length(consignment$cnote)))
+  # and cl.client_code in ('VEDAT','ACGPL')
+  
+  if(cncounts>0){
+  consignment$delivery_date<-as.Date(consignment$delivery_date)
+  consignment$cpd<-as.Date(consignment$cpd)
+  consignment<-consignment%>%mutate(cpb_eligible = ifelse(is.na(delivery_date),ifelse(Sys.Date()-cpd>0,1,0),
+                                                          ifelse(delivery_date-cpd>0,1,0)))
+  consignment<-consignment%>%filter(!consignment_status %in% c('RTO','EXCESS','DRAFTED','SHORTAGE','DELETED'))
+  
+  cpb_eligible_cns<-consignment%>%filter(cpb_eligible==1)
+  cpb_cns_list<-paste0(cpb_eligible_cns$cnote, collapse = ",")
+  
+  
+  con<- dbConnect(MySQL(), user='sj7829',
+                  password='rWt3QK477279u',
+                  dbname='rivigo_zoom',
+                  host='127.0.0.1', port=4001)
+  
+  consignment_schedule_data<- dbGetQuery(con, paste0("select C.id,C.cnote,C.status consignment_status,
+                             date(from_unixtime((delivery_date_time/1000)+19800)) delivery_date,
+                             date(from_unixtime((promised_delivery_date_time/1000)+19800)) cpd,C.weight,C.volume,C.total_boxes,
+                             from_unixtime(round(C.promised_delivery_date_time/1000)) + interval 5 hour + interval 30 minute as promised_delivery_date_time,
+                             from_unixtime(round(C.booking_date_time/1000)) + interval 5 hour + interval 30 minute as booking_date_time,
+                             CS.sequence,CS.location_tag,CS.plan_status,CS.location_type,CS.location_id,CS.departure_cutoff_time as dep_cutoff_time,
+                             (SELECT L1.code from   neo4j_location L1 where L1.id=CS.location_id) as location,
+                             concat(CS.departure_cutoff_time,'_',CS.location_id) as depcutoff_loc_concat,
+                             from_unixtime(round(CS.arrival_scheduled_time/1000)) + interval 5 hour + interval 30 minute as arrival_scheduled_time,
+                             from_unixtime(round(CS.arrival_cutoff_time/1000)) + interval 5 hour + interval 30 minute as arrival_cutoff_time,
+                             from_unixtime(round(CS.arrival_time/1000)) + interval 5 hour + interval 30 minute as arrival_time,
+                             from_unixtime(round(CS.departure_scheduled_time/1000)) + interval 5 hour + interval 30 minute as departure_scheduled_time,
+                             from_unixtime(round(CS.departure_cutoff_time/1000)) + interval 5 hour + interval 30 minute as departure_cutoff_time,
+                             from_unixtime(round(CS.departure_time/1000)) + interval 5 hour + interval 30 minute as departure_time
+                             ,CS.departure_trip_id,tt.original_scheduled_out_time as deptrip_original_scheduled_out_time
+                             from consignment C
+                             inner join consignment_schedule CS on CS.consignment_id
+                             LEFT join trip_tracking tt on tt.trip_id=CS.departure_trip_id and tt.location_id=CS.location_id
+                             where 
+                             C.id = CS.consignment_id and C.is_active = 1 and length(C.cnote)=10
+                             AND C.id = CS.consignment_id and C.is_active = 1 and CS.is_active = 1 
+                             and C.cnote in (",paste0(cpb_eligible_cns$cnote, collapse = ","),")
+                             order by C.cnote, CS.sequence, CS.plan_count;"))
+  # CS.location_type = 'LOCATION'
+  # CS.plan_status!='NOT_REACHED'
+  
+  dbDisconnect(con)
+  
+  consignment_schedule_data$booking_date_time <-lubridate::ymd_hms(consignment_schedule_data$booking_date_time, tz='Asia/Kolkata')
+  consignment_schedule_data$promised_delivery_date_time <-lubridate::ymd_hms(consignment_schedule_data$promised_delivery_date_time, tz='Asia/Kolkata')
+  consignment_schedule_data$arrival_scheduled_time <-lubridate::ymd_hms(consignment_schedule_data$arrival_scheduled_time, tz='Asia/Kolkata')
+  consignment_schedule_data$arrival_cutoff_time <-lubridate::ymd_hms(consignment_schedule_data$arrival_cutoff_time, tz='Asia/Kolkata')
+  consignment_schedule_data$arrival_time <-lubridate::ymd_hms(consignment_schedule_data$arrival_time, tz='Asia/Kolkata')
+  consignment_schedule_data$departure_scheduled_time <-lubridate::ymd_hms(consignment_schedule_data$departure_scheduled_time, tz='Asia/Kolkata')
+  consignment_schedule_data$departure_cutoff_time <-lubridate::ymd_hms(consignment_schedule_data$departure_cutoff_time, tz='Asia/Kolkata')
+  consignment_schedule_data$departure_time <-lubridate::ymd_hms(consignment_schedule_data$departure_time, tz='Asia/Kolkata')
+  
+  consignment_schedule_data$delivery_date<- as.Date(consignment_schedule_data$delivery_date)
+  consignment_schedule_data$cpd<- as.Date(consignment_schedule_data$cpd)
+  
+  consignment_schedule_data$cpb<- ifelse(is.na(consignment_schedule_data$delivery_date),T,
+                                         consignment_schedule_data$delivery_date>consignment_schedule_data$cpd)
+  #delayed arrival condition
+  consignment_schedule_data$delayed_arrival<- consignment_schedule_data$arrival_time> (consignment_schedule_data$arrival_cutoff_time)
+  #delayed dispatch condition
+  consignment_schedule_data$delayed_dispatch<- consignment_schedule_data$departure_time> (consignment_schedule_data$departure_cutoff_time+3600)
+  
+  consignment_schedule_data$dc_buffer<- ifelse(round((consignment_schedule_data$arrival_cutoff_time-consignment_schedule_data$arrival_scheduled_time)/(60*60),2)>0,
+                                               round((consignment_schedule_data$arrival_cutoff_time-consignment_schedule_data$arrival_scheduled_time)/(60*60),2),0)
+  
+  # consignment_schedule_data$dep_cutoff_time<-as.character(consignment_schedule_data$dep_cutoff_time)
+  consignment_schedule_data<-consignment_schedule_data %>% group_by(cnote) %>% 
+    mutate(cooling_buffer=lead(dc_buffer,n = 1,order_by = sequence))%>%
+    mutate(next_location_id=lead(x=location_id,n=1,order_by = sequence))%>%
+    mutate(next_location=lead(x=location,n=1,order_by = sequence))%>%
+    mutate(depcutoff_loc_concat1=paste(depcutoff_loc_concat,next_location_id, sep = '_'))
+  
+  consignment_schedule_data<- consignment_schedule_data %>% 
+    filter(location_type == 'LOCATION' & plan_status!='NOT_REACHED') %>%
+    select('id','cnote','consignment_status','delivery_date','cpd','weight','volume','total_boxes',
+           'promised_delivery_date_time','booking_date_time','sequence','location_tag','plan_status',
+           'location_type','location_id','location','next_location_id','next_location','arrival_scheduled_time','arrival_cutoff_time',
+           'arrival_time','departure_scheduled_time','departure_cutoff_time','departure_time',
+           'departure_trip_id','delayed_arrival',
+           'delayed_dispatch','cpb','cooling_buffer','dep_cutoff_time','depcutoff_loc_concat1','deptrip_original_scheduled_out_time')
+  
+  con<- dbConnect(MySQL(), user='sj7829',
+                  password='rWt3QK477279u',
+                  dbname='rivigo_zoom',
+                  host='127.0.0.1', port=4001)
+  
+  trip_in_time<- dbGetQuery(con,paste0("select trip_id as departure_trip_id, location_id,
+                                       from_unixtime(round(in_time/1000)+19800) in_time
+                                       from trip_tracking where trip_id in (", 
+                                       paste0(unique(consignment_schedule_data$departure_trip_id)[!is.na(unique(consignment_schedule_data$departure_trip_id))],collapse = ','),")
+                                       and in_time is not null"))
+  trip_in_time$in_time<-lubridate::ymd_hms(trip_in_time$in_time, tz='Asia/Kolkata')
+  dbDisconnect(con)
+  
+  consignment_schedule_data<-consignment_schedule_data%>%
+    group_by(cnote) %>%
+    mutate(arrival_trip_id=lag(departure_trip_id,order_by = sequence)) %>% ungroup() %>%
+    left_join(trip_in_time,by = c('arrival_trip_id'='departure_trip_id','location_id')) %>%
+    mutate(unload_delay=ifelse((!is.na(arrival_time)& !is.na(in_time)),
+                               as.numeric(difftime(arrival_time,in_time,units = 'hours')),
+                               NA),
+           remark=ifelse(unload_delay<=2,'timely_unload','unload_delay')) %>%
+    mutate(modified_arrival_time=ifelse((unload_delay<=2|is.na(unload_delay)),arrival_time,in_time+2*60*60))
+  consignment_schedule_data$modified_arrival_time<- as_datetime(consignment_schedule_data$modified_arrival_time,tz='Asia/Kolkata')
+  
+  #delayed arrival_Modified_condition
+  consignment_schedule_data$delayed_arrival_modified<- consignment_schedule_data$modified_arrival_time> (consignment_schedule_data$departure_cutoff_time-3600)
+  
+  
+  # ***************************************************************
+  # unique CNs with CP breached as of the current (last) state
+  
+  a<- consignment_schedule_data %>% filter(cpb) %>% group_by(cnote) %>% 
+    filter(sequence==max(sequence)) %>% ungroup() %>% 
+    mutate(cpb_state= ifelse(is.na(delayed_dispatch),ifelse(delayed_arrival==T,'Red',
+                                                            ifelse(departure_cutoff_time-60*60< Sys.time(),'Red',
+                                                                   'Green')),
+                             ifelse(delayed_dispatch==F,'Green','Red')))
+  
+  a$nineamcutoff<-c('09:00:00')
+  a$cpdnineamcutoff<-lubridate::ymd_hms(paste(a$cpd,a$nineamcutoff),tz='Asia/Kolkata')
+  a<-a%>%mutate(cpdarrivalbefore9= ifelse(modified_arrival_time<cpdnineamcutoff,T,F))
+  # Delivery Cooling is when cpb_state-> Green (varified)
+  
+  delivery_cooling<- a %>% filter(delayed_arrival== FALSE & grepl(pattern = 'DST',x =location_tag)|modified_arrival_time<arrival_cutoff_time & grepl(pattern = 'DST',x =location_tag))
+  
+  # delivery_cooling<- a %>% filter(cpb_state=='Green' & grepl(pattern = 'DST',x =location_tag)) (changed in the v02)
+  
+  non_a<- a %>% filter(!cnote %in% unique(delivery_cooling$cnote))
+  
+  ##########################################################
+  
+  # There are the intransit LH Delay cases 
+  red3<-non_a %>% filter(!is.na(delayed_dispatch)&
+                           delayed_arrival==F) %>% filter(delayed_dispatch==F) %>% 
+    filter(!consignment_status %in% c('EXCESS','SHORTAGE','DAMAGE'))
+  
+  deps<-non_a %>% filter(!is.na(delayed_dispatch)&
+                           delayed_arrival==F) %>% filter(delayed_dispatch==F) %>% 
+    filter(consignment_status %in% c('EXCESS','SHORTAGE','DAMAGE'))
+  #Catogarised all CNs with dispatch not done from the last location
+  red_pickup_delay<- non_a %>% filter(!cnote %in% c(red3$cnote,deps$cnote)) %>% 
+    filter(location_tag %in% 'ASSUMED_SRC_BO')
+  #Above CNs with delayed arrival (Dispatch cooling or LH Delay is not conclusive)
+  red1<- non_a %>%  filter(!location_tag %in% 'ASSUMED_SRC_BO') %>% 
+    filter(!cnote %in% c(red3$cnote,deps$cnote)) %>% 
+    filter(#is.na(delayed_dispatch)& 
+      delayed_arrival==T)%>%mutate(analysis_bucket='red2') # Need more drill down
+  
+  # Above CNs with no delayed arrival but cooling at the PC/Branch (dispatch cooling)
+  # for these CNs delays must have happened in the last leg also via dispatch cooling
+  red2<- non_a %>% filter(!cnote %in% c(red3$cnote,deps$cnote))%>% filter(#is.na(delayed_dispatch)&
+    delayed_arrival==F) %>% filter(!location_tag %in% 'ASSUMED_SRC_BO')%>%mutate(analysis_bucket='red2')
+  
+  #CN location level data for all red CNs
+  red_cns<- consignment_schedule_data %>% filter(cnote %in% red1$cnote)
+  # ***************************************************************
+  
+  # Special case where unloading is 
+  spc<- red_cns 
+  delayed_unload_cns<- a %>%
+    filter(delayed_arrival==T) %>%
+    filter(arrival_cutoff_time>modified_arrival_time) %>%
+    # select(cnote,in_time,arrival_cutoff_time.x,modified_arrival_time) %>%
+    unique()
+  
+  red_cns2<- a %>% filter(cnote %in% red2$cnote)%>%mutate(final_summary='NA')
+  
+  # red_cns$final_summary<- NA
+  spc$final_summary<- NA
+  # red_cns2$final_summary<- NA
+  spc$current_loc_dispatch_delay1<-NA
+  spc$previous_loc_dispatch_delay1<-NA
+  spc$previous_loc_arrival_delay1<-NA
+  spc$current_loc_arrival_delay1<-NA
+  spc$lh_delay1<-NA
+  # spc$buffer_available1<-NA
+  # spc$previous_buffer_available1<-NA
+  
+  ######loop for red1cns
+  
+  for(i in unique(spc$cnote)){
+    #iterating over ith CNs in list of red CNs
+    sub_red_cns<- spc %>% filter(cnote==i) %>% arrange(-sequence) 
+    # print(i)
+    for(j in sub_red_cns$sequence){ 
+      # print(j)
+      # Iterating over jth sequence starting from the last reached/left location for ith CN
+      x<- sub_red_cns %>% filter(sequence==j)
+      # print(x$location_tag)
+      
+      current_loc_dispatch_delay<- as.numeric(difftime(sub_red_cns[sub_red_cns$sequence==(j),]$departure_time,sub_red_cns[sub_red_cns$sequence==(j),]$departure_cutoff_time,units = 'hours'))
+      spc[(spc$cnote==i & spc$sequence==j),'current_loc_dispatch_delay1']<-current_loc_dispatch_delay
+      
+      
+      previous_loc_dispatch_delay<- as.numeric(difftime(sub_red_cns[sub_red_cns$sequence==(j-1),]$departure_time,sub_red_cns[sub_red_cns$sequence==(j-1),]$departure_cutoff_time,units = 'hours'))
+      previous_loc_dispatch_delay<- ifelse(length(is.na(previous_loc_dispatch_delay))==0,0,previous_loc_dispatch_delay)
+      spc[(spc$cnote==i & spc$sequence==j),'previous_loc_dispatch_delay1']<-previous_loc_dispatch_delay
+      
+      previous_loc_arrival_delay<- as.numeric(difftime(sub_red_cns[sub_red_cns$sequence==(j-1),]$modified_arrival_time,sub_red_cns[sub_red_cns$sequence==(j-1),]$arrival_cutoff_time,units = 'hours'))
+      previous_loc_arrival_delay<- ifelse(length(is.na(previous_loc_arrival_delay))==0,0,previous_loc_arrival_delay)
+      spc[(spc$cnote==i & spc$sequence==j),'previous_loc_arrival_delay1']<-previous_loc_arrival_delay
+      
+      current_loc_arrival_delay<- as.numeric(difftime(sub_red_cns[sub_red_cns$sequence==(j),]$modified_arrival_time,sub_red_cns[sub_red_cns$sequence==(j),]$arrival_cutoff_time,units = 'hours'))
+      spc[(spc$cnote==i & spc$sequence==j),'current_loc_arrival_delay1']<-current_loc_arrival_delay
+      
+      
+      lh_delay<- current_loc_arrival_delay-previous_loc_dispatch_delay
+      lh_delay<- ifelse(is.na(lh_delay),0,lh_delay)
+      spc[(spc$cnote==i & spc$sequence==j),'lh_delay1']<-lh_delay
+      
+      buffer_available<- sub_red_cns[sub_red_cns$sequence==(j),]$cooling_buffer
+      # spc[(spc$cnote==i & spc$sequence==j),'buffer_available1']<-buffer_available
+      previous_buffer_available<- sub_red_cns[sub_red_cns$sequence==(j-1),]$cooling_buffer
+      # spc[(spc$cnote==i & spc$sequence==j),'previous_buffer_available1']<-previous_buffer_available
+      
+      reason<- ifelse((current_loc_arrival_delay<=0) & x$location_tag %in% c('ASSUMED_DST_PC','TS_DST_BO','TS_DST_PC','ASSUMED_DST_BO'),'DELIVERY COOLING',
+                      ifelse(current_loc_arrival_delay>0 & x$location_tag %in% c('ASSUMED_SRC_PC','TS_SRC_BO','TS_SRC_PC','ASSUMED_SRC_BO'),'DELAYED_PICKUP',
+                             ifelse(x$location_tag=='INTRACITY_PC','INTRACITY BC','NC')))
+      #
+      if(reason=='NC'){
+        cpb_summary<- ifelse(is.na(current_loc_dispatch_delay),
+                             ifelse(current_loc_arrival_delay<=0,
+                                    'delayed_dispatch',
+                                    ifelse(previous_loc_dispatch_delay<=0,'LH_delay',
+                                           ifelse(previous_loc_arrival_delay>0,'NC',
+                                                  ifelse(previous_loc_dispatch_delay>previous_buffer_available,
+                                                         'delayed_dispatch_prev',
+                                                         ifelse(previous_loc_dispatch_delay>lh_delay,'delayed_dispatch_prev',
+                                                                'LH_delay'))))),
+                             ifelse(current_loc_dispatch_delay>0,
+                                    ifelse(current_loc_arrival_delay<=0,
+                                           'delayed_dispatch',
+                                           ifelse(previous_loc_dispatch_delay<=0,'LH_delay',
+                                                  ifelse(previous_loc_arrival_delay>0,'NC',
+                                                         ifelse(previous_loc_dispatch_delay>previous_buffer_available,
+                                                                'delayed_dispatch_prev',
+                                                                ifelse(previous_loc_dispatch_delay>lh_delay,'delayed_dispatch_prev',
+                                                                       'LH_delay'))))),'NC'))
+        # print(cpb_summary)
+        
+        if(cpb_summary=='NC'){
+          if(j==min(sub_red_cns$sequence)){
+            spc[(spc$cnote==i & spc$sequence==j),'final_summary']<-cpb_summary
+          }
+        }else{
+          k<-ifelse(cpb_summary=='delayed_dispatch',j,j-1)
+          cpb_summary<-ifelse(cpb_summary=='delayed_dispatch_prev','delayed_dispatch',cpb_summary)
+          
+          spc[(spc$cnote==i & spc$sequence==k),'final_summary']<-cpb_summary
+          break}  
+        
+      }else{
+        spc[(spc$cnote==i & spc$sequence==j),'final_summary']<-reason
+        break
+      }
+    }
+  }
+  
+  # Composition of red_cns:- 
+  # delayed_dispatch,LH_delay,NC,delayed_pickup
+  
+  #LH_delay cases : 
+  # 1) Valid LH delayed
+  # 2) LH Reached on time and CN not unloaded
+  
+  dummy1<-spc[spc$remark=='unload_delay',c('cnote','sequence','remark')] 
+  dummy1$sequence<-dummy1$sequence-1 # Changed
+  
+  unload_delay_df<- spc %>% 
+    filter(cnote %in% delayed_unload_cns$cnote) %>% 
+    left_join(dummy1, by = c('cnote','sequence'),all.x=T)%>%
+    filter(final_summary=='LH_delay' & remark.y=='unload_delay')
+  #Incomplete
+  #true LH delay, true Unload delay 
+  
+  ld<- spc %>% filter(final_summary=='LH_delay') %>%
+    filter(!cnote %in% unload_delay_df$cnote)
+  
+  #CNs at assumed_dst location with arrival on time -> delivery_cooling
+  delivery_cool<-   spc %>% filter(final_summary=='delayed_dispatch') %>% #union_all(red_cns2) %>%
+    filter((grepl(pattern = 'DST',x =location_tag)& delayed_arrival==F)) # changed
+  
+  #remove CNs at assumed_dst location with arrival on time -> real dispatch delay cases
+  dd<- spc %>% filter(final_summary=='delayed_dispatch') %>% #union_all(red_cns2) %>%
+    filter(!cnote %in% unique(delivery_cool$cnote)) 
+  
+  red_cns2<- red_cns2 %>% mutate(final_summary=ifelse(location_tag %in% c('ASSUMED_DST_PC','TS_DST_BO','TS_DST_PC','ASSUMED_DST_BO'),
+                                                      'DELIVERY COOLING',
+                                                      ifelse(location_tag=='INTRACITY_PC','INTRACITY DELIVERY COOLING', 
+                                                             'delayed_dispatch'))) 
+  red_cns2_dd<- red_cns2%>% 
+    filter(final_summary=='delayed_dispatch' & (!consignment_status %in% c('EXCESS','SHORTAGE')))
+  
+  
+  #rest of the cases for list SPC
+  other_cases<- spc %>% 
+    filter(!cnote %in% unique(c(unload_delay_df$cnote,ld$cnote,dd$cnote,delivery_cool$cnote)))
+  
+  #PostgreSQL is having plan data more than 7 days whereas MySQL has only for last 7 Days
+  con_pg<- dbConnect(PostgreSQL(), user='rk7417',
+                     password='P@$$w0rd',
+                     dbname='rivigo_zoom',
+                     host='127.0.0.1', port=6001)
+if((length(dd$id)+length(red_cns2_dd$id))>0)  
+{  
+plan_for_dd<- dbGetQuery(con_pg,paste0("select plan.consignment_id, plan.trip_id,cs.departure_trip_id,is_autoplanned,plan.created_at,
+plan.cpb_category,plan.last_updated_at,plan.vehicle_type,t.arrival_time,t.dispatch_time,t.status,plan.from_location_id,plan.to_location_id,plan.is_arrived,cs.sequence
+from plan 
+join consignment_schedule cs on cs.consignment_id= plan.consignment_id and plan.from_location_id=cs.location_id and cs.is_active=1 and is_autoplan_eligible=1
+join trip t on t.id= plan.trip_id
+where plan.consignment_id in (",paste0(unique(c(dd$id,red_cns2_dd$id)),collapse = ','),")
+order by plan.consignment_id,plan.last_updated_at;"))
+dbDisconnect(con_pg)
+}  
+  dd2<- dd %>% 
+    left_join(plan_for_dd,by = c("id"="consignment_id",
+                                 "location_id"="from_location_id"))
+  ddd<- dd2
+  red_cns2_dd2<- red_cns2_dd %>%
+    left_join(plan_for_dd,by = c("id"="consignment_id",
+                                 "location_id"="from_location_id"))
+  
+  red_cns2_dd2<- red_cns2_dd2[,colnames(red_cns2_dd2)[colnames(red_cns2_dd2) %in% colnames(dd2)]]
+  dd2<- dd2[,colnames(red_cns2_dd2)[colnames(red_cns2_dd2) %in% colnames(dd2)]]
+  
+  dd2<- rbind(dd2,red_cns2_dd2)
+  
+  #List of CNs where the cause can be tracked simply by Tracking the change in State of CNs from anything to Red
+  
+  xyz1<- dd2 %>% group_by(cnote) %>% 
+    mutate(next_cpb_category=lead(x = cpb_category,n = 1,order_by = last_updated_at)) %>% ungroup() %>%
+    filter(cpb_category!='RED'& next_cpb_category=='RED')%>%
+    mutate(xyz_category='xyz1') %>%
+    group_by(cnote)%>%
+    filter(last_updated_at==max(last_updated_at))%>% ungroup() 
+  
+  #List of all those CNs where the cause can't be found by above method
+  # marked red while planning in any trip
+  xyz2<- dd2 %>% 
+    filter(!cnote %in% unique(xyz1$cnote)) %>% filter(cpb_category=='RED') %>%
+    group_by(cnote) %>% filter(last_updated_at==min(last_updated_at)) %>% 
+    ungroup() %>%
+    mutate(next_cpb_category=NA)%>%mutate(xyz_category='xyz2') 
+  #Never marked Red during any planning
+  xyz3<- dd2 %>% filter(!cnote %in% unique(xyz1$cnote)) %>%
+    filter(!cnote %in% unique(xyz2$cnote ))%>% 
+    group_by(cnote) %>% filter(last_updated_at==max(last_updated_at)) %>% 
+    ungroup() %>%
+    mutate(next_cpb_category=NA)%>%mutate(xyz_category='xyz3')
+  
+  xyz<-rbind(rbind(xyz1,xyz2),xyz3)
+  xyz_na<- dd2 %>% filter(cnote %in% unique(dd2$cnote)[!unique(dd2$cnote) %in% xyz$cnote])%>%
+    mutate(next_cpb_category=NA)%>%mutate(xyz_category='xyz_na') 
+  xyz<-rbind(xyz,xyz_na)
+  
+  # CN Never planned so far
+  # xyz[xyz$status!='DELETED',] %>% View()
+  
+  #util_data for the trips in xyz except the deleted trips  
+  
+  trips<- ifelse(paste0(unique(xyz$trip_id)[!is.na(unique(xyz$trip_id))],collapse = ',')=="",00000,paste0(unique(xyz$trip_id)[!is.na(unique(xyz$trip_id))],collapse = ','))
+  
+  #trip 00000 concatenated here incase if it comes null to run the util_data sql script
+  # trips1<- paste0((xyz[xyz$status!='DELETED',]$trip_id)[!is.na(unique(xyz$trip_id))],collapse = ',')
+  
+  con<- dbConnect(MySQL(), user='sj7829',
+                  password='rWt3QK477279u',
+                  dbname='rivigo_zoom',
+                  host='127.0.0.1', port=4001)
+  
+  util_data<- dbGetQuery(con,paste0("SELECT FROM_UNIXTIME(t.created_at / 1000 + 19800) created_at,
+                           FROM_UNIXTIME(t.scheduled_dispatch_time / 1000 + 19800) Start_location_scheduled_dispatch_time,
+IFNULL(FROM_UNIXTIME(tt4.original_scheduled_out_time / 1000 + 19800),'-') scheduled_dispatch_time,
+IFNULL(FROM_UNIXTIME(tt4.out_time / 1000 + 19800),'-') actual_dispatch_time,
+IFNULL(FROM_UNIXTIME(tt3.in_time / 1000 + 19800),'-') as end_location_reach_time,
+IF(t.status='END',FROM_UNIXTIME(t.last_updated_at / 1000 + 19800),'Trip not closed yet') as trip_closure_time, 
+t1.tid trip_id, t.partner_trip_code as prime_trip_id, t.status trip_status, t.vehicle_number, t.vehicle_type type, 
+t.feeder_vendor_code as vendor,
+ifnull(lsch.generation_source_type, t.generation_source_type) as vendor_type, r.code route, r.type route_type,
+(SELECT N1.code from neo4j_location N1 WHERE N1.id=t2.lid)  as start_location,
+(SELECT N1.code from neo4j_location N1 WHERE N1.id=tt3.location_id) as end_location,
+t2.lid start_location_id,
+tt3.location_id end_location_id,google_distance_km,max_weight,
+SUM(weight) weight, SUM(volume) volume,SUM(boxes) total_boxes,sum(green_weight) green_weight
+
+FROM (SELECT m.trip_id tid, tt1.stop_sequence s1, tt2.stop_sequence s2, tt1.location_id l1, tt2.location_id AS l2, m.weight, m.volume, m.boxes,coalesce(sum(c.weight),0) green_weight
+                           FROM trip_tracking tt1 
+                           INNER JOIN trip_tracking tt2 ON tt2.trip_id = tt1.trip_id and tt1.trip_id in (",trips,")
+                           INNER JOIN manifest m ON tt1.location_id = m.from_location_id AND tt2.location_id = m.to_location_id
+                           left join consignment_schedule cs on m.id=cs.departure_manifest_id and
+                           cs.is_active=1 
+                           and cs.cpb_category='GREEN'
+                           left join consignment  c on c.id= cs.consignment_id and c.is_active=1
+                           WHERE tt1.stop_sequence < tt2.stop_sequence AND tt1.trip_id = m.trip_id AND m.status != 'DELETED'
+                           group by 1,2,3,4,5,6,7,8
+                           ORDER BY tid , s1 , s2) t1,
+
+(SELECT stop_sequence sq, stop_sequence + 1 sq1, location_id lid, trip_id tid
+FROM trip_tracking
+where trip_tracking.trip_id in (",trips,")) t2
+
+INNER JOIN trip_tracking tt3 ON tt3.trip_id = t2.tid AND tt3.stop_sequence = t2.sq1  and tt3.trip_id in (",trips,")
+inner join trip_tracking tt4 on tt4.trip_id = t2.tid and tt4.stop_sequence = t2.sq and tt4.trip_id in (",trips,")
+INNER JOIN trip t ON t.id = tt3.trip_id  and t.id = tt4.trip_id and t.id in (",trips,")
+INNER JOIN route r ON r.id = t.route_id 
+LEFT OUTER JOIN linehaul_schedule lsch on lsch.id = t.generation_source_id 
+left join sectional_tat on t2.lid =sectional_tat.from_location_id and 
+tt3.location_id = sectional_tat.to_location_id
+left join vehicle_type on t.vehicle_type=vehicle_type.type
+
+WHERE t1.s1 <= t2.sq AND t1.s2 > t2.sq AND t2.tid = t1.tid AND
+t.id in (
+select distinct trip.id trip_id                            
+from trip) 
+GROUP BY t.id , t2.lid , tt3.location_id
+ORDER BY t.id , t2.sq , t1.s1 , t1.s2;")) %>% mutate(util=round(weight*100/max_weight,0)) %>%
+    select(trip_id,start_location_id,scheduled_dispatch_time,trip_status,max_weight,weight,util,green_weight)
+  
+  dbDisconnect(con)
+  
+  #depcutoff_loc_concat is orginal_sched_out_time and location_id in the trip_tracking table & departure_cuoff and location of cons_sched_data
+  #all the depcutoff_loc_concat would be searched in the trip tracking to know the status at the time of departure_cutoff of cn
+  
+  depcutoff_loc_concat_id<-paste0(unique(xyz$depcutoff_loc_concat1)[!is.na(unique(xyz$depcutoff_loc_concat1))],collapse = "','")
+  # xyz$depcutoff_loc_concat<-as.character(xyz$depcutoff_loc_concat)
+  dep_cutoff_time1<-paste0(unique(xyz$dep_cutoff_time)[!is.na(unique(xyz$dep_cutoff_time))],collapse = "','")
+  
+  con<- dbConnect(MySQL(), user='sj7829',
+                  password='rWt3QK477279u',
+                  dbname='rivigo_zoom',
+                  host='127.0.0.1', port=4001)
+  
+  
+  trip_tracking_depcutoff_concat<-dbGetQuery(con,paste0("SELECT tk.* FROM 
+                        (SELECT tt1.created_at,concat(tt1.original_scheduled_out_time,'_',tt1.location_id,'_',tt2.location_id) AS depcutoff_loc_concat,
+                           tt1.trip_id tid, tt1.stop_sequence s1, tt2.stop_sequence s2, tt1.location_id l1, tt2.location_id AS l2,
+                           tt1.original_scheduled_out_time,tt1.trip_tracking_status,
+                           m.weight, m.volume, m.boxes,coalesce(sum(c.weight),0) green_weight
+                           FROM trip_tracking tt1 
+                           INNER JOIN trip_tracking tt2 ON tt2.trip_id = tt1.trip_id
+                           INNER JOIN manifest m ON tt1.location_id = m.from_location_id AND tt2.location_id = m.to_location_id
+                           left join consignment_schedule cs on m.id=cs.departure_manifest_id and
+                           cs.is_active=1 
+                        
+                           left join consignment  c on c.id= cs.consignment_id and c.is_active=1
+                           WHERE tt1.stop_sequence < tt2.stop_sequence AND tt1.trip_id = m.trip_id AND m.status != 'DELETED'
+                           AND tt1.original_scheduled_out_time in ('",dep_cutoff_time1,"')
+                           group by 1,2,3,4,5,6,7,8
+                           ORDER BY tid , s1 , s2)tk
+                           where tk.depcutoff_loc_concat in ('",depcutoff_loc_concat_id,"')"))
+  
+  trip_tracking_depcutoff_concat<-trip_tracking_depcutoff_concat%>%group_by(depcutoff_loc_concat)%>%
+    filter(created_at== max(created_at))%>%ungroup()
+  
+  xyz<-xyz%>%left_join(trip_tracking_depcutoff_concat,by=c('depcutoff_loc_concat1'='depcutoff_loc_concat'))%>%
+    mutate(check_nonop=ifelse(!is.na(deptrip_original_scheduled_out_time),deptrip_original_scheduled_out_time<xyz$dep_cutoff_time,'NA'))
+  
+  xyz_final<-xyz%>%select('id','cnote','consignment_status',weight.x,volume.x,'booking_date_time','cpd','delivery_date','location_tag','location_id','location_type','plan_status','location','next_location','delayed_arrival_modified','final_summary',
+                          'departure_cutoff_time','departure_time','dep_cutoff_time','departure_trip_id.x','xyz_category','deptrip_original_scheduled_out_time','trip_id','status','is_autoplanned','is_arrived','cpb_category','next_cpb_category','tid','original_scheduled_out_time','trip_tracking_status',check_nonop)
+  
+  # xyz_final$check_nonop<-as.logical(xyz_final$check_nonop)
+  final_data<- xyz_final %>%  
+    left_join(util_data,by = c('trip_id'='trip_id','location_id'='start_location_id'),suffix = c('','.y')) %>% unique()%>%
+    mutate(reason=ifelse(!is.na(check_nonop),ifelse(check_nonop==F,
+                                                    ifelse(!is.na(trip_tracking_status),ifelse(trip_tracking_status=='DELETED','LH_NON_OPERATIONAL',ifelse(departure_trip_id.x==tid,
+                                                            ifelse(departure_trip_id.x==trip_id,(ifelse(is_autoplanned==1,'LH_DELAYED_DISPATCH','LH_DELAYED_DISPATCH III')),'LH_DELAYED_DISPATCH_PLAN_ERR'),
+                                                              ifelse(departure_trip_id.x==trip_id,(ifelse(is_autoplanned==1,'LH_DELAYED_DISPATCH','LH_DELAYED_DISPATCH III')),ifelse(trip_id==tid,ifelse(is_autoplanned==1,ifelse(is_arrived==1,'SPILLOVER_REMOVAL_FROM_AUTOPLAN','APN_LATE_PICKUP_ARRIVAL'),'AUTOPLAN_ERR'),'AUTOPLAN_ERR II')))),
+                                                              ifelse(departure_trip_id.x==trip_id,ifelse(is_autoplanned==1,'LH_DELAYED_DISPATCH','AUTOPLAN_ERROR'),ifelse(is_autoplanned==1,'AUTOPLAN_NON_ADHERENCE','LH_NON_OPERATIONAL II'))),
+                                                              ifelse(!is.na(status),ifelse(departure_trip_id.x==trip_id,ifelse(status=='DELETED','LH_NON_OPERATIONAL',ifelse(is_autoplanned==0,'AUTOPLAN_ERROR','LH_DELAYED_DISPATCH')),
+                                                                                 ifelse(status=='DELETED','LH_NON_OPERATIONAL','LH_DELAYED_DISPATCH II')),'LH_DELAYED_DISPATCH II')),ifelse(location==next_location,'CONSIGNEE_ISSUES',
+                                                                                                                                                    ifelse(is.na(departure_time),'COOLING_HUB',
+                                                                                                                                                          if_else(is.na(delivery_date),'COOLING_HUB',
+                                                                                                                                                            ifelse(status=='DELETED'& is_autoplanned==1,'LH_NON_OPERATIONAL','LH_DELAYED_DISPATCH II'))))))
+
+  
+  red2_deps<- red_cns2%>% 
+    filter(consignment_status %in% c('EXCESS','SHORTAGE'))
+  
+  red_cns2_dc<- red_cns2%>% 
+    filter(location_tag %in% c('ASSUMED_DST_PC','TS_DST_BO','TS_DST_PC','ASSUMED_DST_BO'))
+  
+  red_cns2_intra<- red_cns2%>% 
+    filter(location_tag %in% c('INTRACITY_PC'))
+  
+  
+  
+  final_data<- final_data  %>%
+    select(cnote,consignment_status,location_tag,final_summary,reason) 
+  ld<- ld  %>%
+    select(cnote,consignment_status,location_tag,final_summary) %>% mutate(reason='LH_delay') 
+  delivery_cool<- delivery_cool %>%
+    select(cnote,consignment_status,location_tag,final_summary) %>% mutate(reason='DELIVERY COOLING') 
+  other_cases<- other_cases %>% filter(!is.na(final_summary)) %>%
+    select(cnote,consignment_status,location_tag,final_summary) %>% mutate(reason=final_summary) 
+  
+  red2_deps<- red2_deps %>% filter(!is.na(final_summary)) %>%
+    select(cnote,consignment_status,location_tag,final_summary) %>% mutate(reason='DEPS') 
+  
+  red_cns2_dc<- red_cns2_dc %>% filter(!is.na(final_summary)) %>%
+    select(cnote,consignment_status,location_tag,final_summary) %>% mutate(reason=final_summary) 
+  red_cns2_intra<- red_cns2_intra  %>%
+    select(cnote,consignment_status,location_tag,final_summary) %>% mutate(reason='DELIVERY COOLING') 
+  red3<- red3 %>%
+    select(cnote,consignment_status,location_tag) %>% mutate(final_summary='Intrasit_LH_delay',reason='LH_delay') 
+  deps<- deps %>%
+    select(cnote,consignment_status,location_tag) %>% mutate(final_summary='DEPS',reason='DEPS') 
+  red_pickup_delay<- red_pickup_delay %>%
+    select(cnote,consignment_status,location_tag) %>% mutate(final_summary='DELAYED_PICKUP',reason='DELAYED_PICKUP') 
+  delivery_cooling<- delivery_cooling %>%
+    select(cnote,consignment_status,location_tag) %>% mutate(final_summary='DELIVERY COOLING',reason='DELIVERY COOLING') 
+  
+  
+  cpb_summmmary<- final_data %>% 
+    union_all(ld) %>%
+    union_all(delivery_cool) %>%
+    union_all(other_cases) %>%
+    union_all(red2_deps) %>%
+    union_all(red_cns2_dc) %>%
+    union_all(red_cns2_intra) %>%
+    union_all(red3) %>%
+    union_all(red_pickup_delay) %>%
+    union_all(delivery_cooling) %>% unique()
+  
+  cn_cpd<- consignment_schedule_data %>% select(cnote,cpd) %>% unique()
+  delivery_cooling_cpbcns1<-cpb_summmmary%>%filter(reason =='DELIVERY COOLING')%>%select(cnote)%>%unique()
+  xy_df<-data.frame(cnote='8001022559') #in case if null cnote comes 
+  delivery_cooling_cpbcns<-rbind(delivery_cooling_cpbcns1,xy_df)
+  con<- dbConnect(MySQL(), user='sj7829',
+                  password='rWt3QK477279u',
+                  dbname='rivigo_zoom',
+                  host='127.0.0.1', port=4001)
+  
+  
+  query<- paste0("select cnote,case when reason like '%Refusing to accept%' or 
+  reason like '%Reschedule%' or 
+  reason like '%Appointment Delivery%' or 
+  reason like '%Consignor Requested to hold%' or 
+  reason like '%Contact person not reachable%' or 
+  reason like '%To pay amount not ready%' or 
+  reason like 'To pay amount not ready%' or 
+  reason like '%To pay amount not ready' or 
+  reason like '%Open Delivery%' or 
+  reason like '%Self pickup%' or 
+  reason like '%Cheque/DD not ready%' or 
+  reason like '%Reschedule time%' then 'CONSIGNEE_ISSUES'
+  when reason like '%Entry prohibited due to security reasons%' or
+  reason like '%Local Disturbance%' or
+  reason like '%Uncontrolled%' or
+  reason like '%Heavy Rains%' or
+  reason like '%Local Festival%' then 'Uncontrolled_delay' end as reason,
+  date(from_unixtime(dispatch_time/1000+19800)) delivery_attempt_date
+  
+  from
+  (select u.cnote,u.reason,delivery_run_sheet.dispatch_time
+  from undelivered_consignments u
+  join delivery_run_sheet on delivery_run_sheet.id=u.old_drs_id
+  where u.cnote in ('",paste0(delivery_cooling_cpbcns$cnote,collapse = "','"),"') ) ua;")
+  
+  delivery_failed<- dbGetQuery(con,query)
+  dbDisconnect(con)
+  
+  a1<- delivery_failed %>% 
+    filter(reason %in% c('Uncontrolled_delay','CONSIGNEE_ISSUES')) %>%
+    left_join(cn_cpd,by = 'cnote') %>% filter(delivery_attempt_date<=cpd)%>%
+    group_by(cnote)%>%
+    filter(delivery_attempt_date==min(delivery_attempt_date))%>%
+    ungroup()%>%
+    mutate(reason_sequence=0)
+  
+  
+  query_mongo_alert<-paste0("SELECT kp.*,
+  RANK()OVER(
+  PARTITION BY kp.cnote
+  ORDER BY kp.last_updated_at)reason_sequence
+  FROM
+  (SELECT * 
+  FROM (select cnote,case when reason like '%Refusing to accept%' or 
+  reason like '%Reschedule%' or reason like '%Consignee requested to reschedule%' or
+  reason like '%Consignee asking for delivery at different pin-code%' or
+  reason like '%Appointment Delivery%' or reason like '%Consignor Requested to hold%' or 
+  reason like '%Contact person not reachable%' or 
+  reason like '%To pay amount not ready%' or reason like 'To pay amount not ready%' or 
+  reason like '%To pay amount not ready' or
+  reason like '%amount not ready%' or reason like '%Cheque/DD not ready%' or
+  reason like '%Consignee refusing to accept delivery%' or
+  reason like '%Consignee to collect from PC%' or
+  reason like '%ASN required for delivery%' or reason like '%Client week off%' or
+  reason like '%Market closed for delivery%' or reason like '%Open Delivery%' or 
+  reason like '%Self pickup%' or reason like '%Cheque/DD not ready%' or 
+  reason like '%Reschedule time%' then 'CONSIGNEE_ISSUES'
+  when reason like '%Entry prohibited due to security reasons%' or
+  reason like '%Local Disturbance%' or
+  reason like '%Uncontrolled Delay%' or
+  reason like '%Uncontrolled%' or reason like '%Heavy Rains%' or
+  reason like '%Local Festival%' then 'Uncontrolled_delay' end as reason,
+  last_updated_at,
+  date(to_timestamp(last_updated_at/1000) at time zone 'Asia/Kolkata') as delivery_attempt_date
+  from
+  (Select cnote,reason,last_updated_at from ts_mongo_zoom_prod_cn_manual_alert_event_sink_prod
+  where cnote in ('",paste0(delivery_cooling_cpbcns$cnote,collapse = "','"),"'))K)P
+  WHERE P.reason is NOT NULL)kp;")
+  
+  # '",paste0(delivery_cooling_cpbcns$cnote,collapse = "','"
+  
+  con_pg<- dbConnect(PostgreSQL(), user='rk7417',
+                     password='P@$$w0rd',
+                     dbname='rivigo_zoom',
+                     host='127.0.0.1', port=6001)
+  a2<-dbGetQuery(con_pg,paste0("SELECT kp.*,
+  RANK()OVER(
+  PARTITION BY kp.cnote
+  ORDER BY kp.last_updated_at)reason_sequence
+  FROM
+  (SELECT * 
+  FROM (select cnote,case when reason like '%Refusing to accept%' or 
+  reason like '%Reschedule%' or reason like '%Consignee requested to reschedule%' or
+  reason like '%Consignee asking for delivery at different pin-code%' or
+  reason like '%Appointment Delivery%' or reason like '%Consignor Requested to hold%' or 
+  reason like '%Contact person not reachable%' or 
+  reason like '%To pay amount not ready%' or reason like 'To pay amount not ready%' or 
+  reason like '%To pay amount not ready' or
+  reason like '%amount not ready%' or reason like '%Cheque/DD not ready%' or
+  reason like '%Consignee refusing to accept delivery%' or
+  reason like '%Consignee to collect from PC%' or
+  reason like '%ASN required for delivery%' or reason like '%Client week off%' or
+  reason like '%Market closed for delivery%' or reason like '%Open Delivery%' or 
+  reason like '%Self pickup%' or reason like '%Cheque/DD not ready%' or 
+  reason like '%Reschedule time%' then 'CONSIGNEE_ISSUES'
+  when reason like '%Entry prohibited due to security reasons%' or
+  reason like '%Local Disturbance%' or
+  reason like '%Uncontrolled Delay%' or
+  reason like '%Uncontrolled%' or reason like '%Heavy Rains%' or
+  reason like '%Local Festival%' then 'Uncontrolled_delay' end as reason,
+  last_updated_at,
+  date(to_timestamp(last_updated_at/1000) at time zone 'Asia/Kolkata') as delivery_attempt_date
+  from
+  (Select cnote,reason,last_updated_at from ts_mongo_zoom_prod_cn_manual_alert_event_sink_prod
+  where cnote in ('",paste0(delivery_cooling_cpbcns$cnote,collapse = "','"),"'))K)P
+  WHERE P.reason is NOT NULL)kp;"))
+  
+  dbDisconnect(con_pg)
+  a21<-a2%>%left_join(cn_cpd,by = 'cnote')%>%
+    group_by(cnote)%>%filter(reason_sequence==1)%>%ungroup()%>%
+    select(cnote,reason,delivery_attempt_date,cpd,reason_sequence)
+  
+  alerts_cns<-rbind(a1,a21)%>%select(cnote,reason,delivery_attempt_date,cpd,reason_sequence)%>%
+    group_by(cnote)%>%filter(reason_sequence==min(reason_sequence))%>%
+    ungroup()
+  
+  cpb_summary<- cpb_summmmary %>% 
+    left_join(alerts_cns,by = 'cnote',suffix=c('','_y')) %>%
+    mutate(reason=ifelse(!is.na(reason_y),reason_y,reason )) %>%
+    select(colnames(cpb_summmmary))
+  
+  # write.csv(x = cpb_summary,file = 'cpb_summary_file.csv',row.names = F)
+  # print(paste0('Total CNs:',length(unique(consignment_schedule_data$cnote))))
+  # 
+  # print(paste0('Total CPB CNs:',length(unique(consignment_schedule_data[consignment_schedule_data$cpb,]$cnote))))
+  
+  cpb_summary2<-consignment%>%
+    left_join(cpb_summary, by='cnote')%>%
+    select(id,cnote,cnote_type,client_code,lane,service_type,booking_date_time,cpd,delivery_date,cpb_eligible,reason)%>%
+    mutate(reason=ifelse(cpb_eligible==0,"CPM",reason))
+  cpb_summary2$iteration<-kkk
+  df <- data.frame(cpb_summary2)
+  df_total <- rbind(df_total,df)  
+} #this parenthesis for cnote counts check ifelse condition 
+  
+} #this parenthesis for iteraring over no of days kkk
+
+# setwd(dir = '/home/administrator/Documents/all_crons/cpb/')
+write.csv(df_total,file=paste0("cpb_summary_data",collapse = NULL))
+
+# con_local<- dbConnect(PostgreSQL(),user='super_user',
+#                       password='admin@rivigo',
+#                       dbname='zoom_ops',
+#                       host='111.93.121.18', port=5432)
+# dbSendQuery(conn =con_local ,'truncate table cpb_summary_data')
+# 
+# dbWriteTable(conn =con_local ,name = 'cpb_summary_data',value = df_total,append=T,row.names=F)
+# 
+# dbSendQuery(conn =con_local ,'grant select on public.cpb_summary_data to readonly')
+# dbDisconnect(con_local)
